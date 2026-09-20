@@ -1,0 +1,69 @@
+1. JSON para Escenario de Operación Normal (Valores cercanos a la media)
+Usa este para demostrar que el motor está trabajando estable y seguro:
+
+{
+  "temperature": 75.0,
+  "vibration": 50.0,
+  "humidity": 55.0,
+  "pressure": 3.0,
+  "energy_consumption": 2.7,
+  "machine_status": 1
+}
+
+2. JSON para Escenario de Riesgo de Falla Crítica (Valores hacia los límites máximos)
+
+{
+  "temperature": 118.5,
+  "vibration": 110.2,
+  "humidity": 78.0,
+  "pressure": 4.8,
+  "energy_consumption": 4.9,
+  "machine_status": 0
+}
+
+3. Estado de Carga Baja (Arranque en frío o bajo rendimiento)
+Valores en el extremo inferior del dataset, pero seguros.
+
+{
+  "temperature": 40.2,
+  "vibration": 5.1,
+  "humidity": 35.0,
+  "pressure": 1.5,
+  "energy_consumption": 0.8,
+  "machine_status": 1
+}
+
+4. Alerta por Sobrecalentamiento Térmico (Riesgo de Falla)
+Temperatura rozando el límite histórico superior con vibración moderadamente alta.
+
+{
+  "temperature": 115.8,
+  "vibration": 85.4,
+  "humidity": 72.0,
+  "pressure": 4.5,
+  "energy_consumption": 4.2,
+  "machine_status": 0
+}
+
+5. Alerta por Vibración Anómala (Posible des alineación mecánica)
+Vibración extremadamente alta cercana al tope de 113, con estado de máquina apagada o en fallo (0).
+
+{
+  "temperature": 82.4,
+  "vibration": 110.5,
+  "humidity": 60.0,
+  "pressure": 3.8,
+  "energy_consumption": 3.9,
+  "machine_status": 0
+}
+
+6. Falla Crítica Total (Estrés múltiple del motor)
+
+{
+  "temperature": 120.1,
+  "vibration": 112.9,
+  "humidity": 79.5,
+  "pressure": 4.9,
+  "energy_consumption": 4.8,
+  "machine_status": 0
+}
