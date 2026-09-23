@@ -8,6 +8,7 @@
 
 El proyecto está estructurado bajo estándares profesionales de desarrollo de software y MLOps:
 
+```text
 AgroSentinel-Predictivo/
 │
 ├── data/                               # Artefactos de datos, modelos entrenados y DB
