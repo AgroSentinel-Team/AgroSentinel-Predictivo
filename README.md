@@ -32,7 +32,7 @@ AgroSentinel-Predictivo/
 ├── .gitignore                          # Archivos excluidos del control de versiones
 ├── Pruebas.txt                         # Registro de pruebas manuales y payloads de ejemplo
 └── README.md                           # Documentación oficial del proyecto
-
+```
 ---
 
 ## 🚀 Características Principales
