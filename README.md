@@ -69,7 +69,7 @@ Sigue estos pasos para clonar y poner en marcha el proyecto localmente:
    .\venv\Scripts\Activate
 
 3. **Instala las dependencias necesarias:**
-   pip install fastapi uvicorn pydantic pandas scikit-learn joblib sqlalchemy
+   pip install fastapi uvicorn pydantic pandas numpy scikit-learn joblib sqlalchemy seaborn matplotlib
 
 ---
 
