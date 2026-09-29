@@ -1,9 +1,10 @@
 from datetime import datetime
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import joblib
 import pandas as pd
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -19,6 +20,7 @@ class SensorLogDB(Base):
     __tablename__ = "historial_sensores"
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    machine_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     temperature = Column(Float)
     vibration = Column(Float)
@@ -31,10 +33,8 @@ class SensorLogDB(Base):
     confianza = Column(Float)
     componentes_afectados = Column(String)
 
-# Creamos la base de datos y la tabla si no existen
 Base.metadata.create_all(bind=engine)
 
-# Dependencia para obtener la sesión de la base de datos en cada petición
 def get_db():
     db = SessionLocal()
     try:
@@ -46,44 +46,52 @@ def get_db():
 app = FastAPI(
     title="AgroSentinel Predictive API",
     description="API para monitoreo predictivo, diagnóstico inteligente y persistencia de datos",
-    version="3.0"
+    version="3.3"
 )
 
-# Cargamos el modelo limpio
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 modelo = joblib.load('data/modelo_rf_final.pkl')
 
 class DatosSensores(BaseModel):
+    machine_id: str = Field(..., description="ID único del equipo, ej: EQ-001")
     temperature: float
     vibration: float
     humidity: float
     pressure: float
     energy_consumption: float
-    machine_status: int = Field(..., ge=0, le=1, description="Estado de la máquina: 0 para Apagado, 1 para Encendido")
+    machine_status: int = Field(..., ge=0, le=1)
 
 def diagnosticar_fallas(datos: DatosSensores):
     anomalias = []
     
     if datos.temperature > 105.0:
-        anomalias.append(f"Temperatura crítica ({datos.temperature}°C - Riesgo de sobrecalentamiento)")
+        anomalias.append(f"Temperatura crítica ({datos.temperature}°C)")
     elif datos.temperature < 40.0:
-        anomalias.append(f"Temperatura muy baja ({datos.temperature}°C - Posible fallo en arranque)")
+        anomalias.append(f"Temperatura muy baja ({datos.temperature}°C)")
         
     if datos.vibration > 90.0:
-        anomalias.append(f"Vibración excesiva ({datos.vibration} Hz - Posible daño mecánico o desalineación)")
+        anomalias.append(f"Vibración excesiva ({datos.vibration} Hz)")
         
     if datos.humidity > 75.0:
-        anomalias.append(f"Humedad ambiental muy alta ({datos.humidity}% - Riesgo de cortocircuito o condensación)")
+        anomalias.append(f"Humedad muy alta ({datos.humidity}%)")
         
     if datos.pressure > 4.5:
-        anomalias.append(f"Presión elevada ({datos.pressure} bar - Sobrecarga en el sistema)")
+        anomalias.append(f"Presión elevada ({datos.pressure} bar)")
     elif datos.pressure < 1.5:
-        anomalias.append(f"Presión baja ({datos.pressure} bar - Posible fuga o fallo de bomba)")
+        anomalias.append(f"Presión baja ({datos.pressure} bar)")
         
     if datos.energy_consumption > 4.5:
-        anomalias.append(f"Consumo de energía alto ({datos.energy_consumption} kW - Esfuerzo excesivo del motor)")
+        anomalias.append(f"Consumo de energía alto ({datos.energy_consumption} kW)")
         
     if datos.machine_status == 0 and (datos.temperature > 90 or datos.vibration > 80):
-        anomalias.append("Incoherencia operacional: El motor reporta estado apagado/inactivo pero registra valores de estrés elevados")
+        anomalias.append("Motor apagado reportando estrés térmico/mecánico")
 
     return anomalias
 
@@ -93,7 +101,6 @@ def home():
 
 @app.post("/predecir")
 def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
-    # 1. Preparamos los datos para el modelo de ML
     entrada_df = pd.DataFrame([{
         'temperature': datos.temperature,
         'vibration': datos.vibration,
@@ -103,12 +110,14 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         'machine_status': datos.machine_status
     }])
     
-    # 2. Predicción de Machine Learning
     prediccion = int(modelo.predict(entrada_df)[0])
     probabilidad = float(modelo.predict_proba(entrada_df).max())
-    
-    # 3. Diagnóstico de componentes
     detalles_fallas = diagnosticar_fallas(datos)
+    
+    # NUEVA LÓGICA: Inyección de parámetros reales en la alerta de IA
+    if prediccion == 1 and len(detalles_fallas) == 0:
+        resumen_parametros = f"T: {datos.temperature}°C | Vib: {datos.vibration}Hz | Hum: {datos.humidity}% | Pres: {datos.pressure}bar"
+        detalles_fallas.append(f"Alerta IA ({probabilidad*100:.1f}%): Combinación riesgosa detectada en -> {resumen_parametros}")
     
     if prediccion == 1 or len(detalles_fallas) > 0:
         estado = "¡Alerta! Riesgo de Falla Crítica en el Motor"
@@ -116,10 +125,10 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
     else:
         estado = "Motor Operando con Normalidad"
 
-    componentes_texto = ", ".join(detalles_fallas) if len(detalles_fallas) > 0 else "Ninguno (Parámetros estables)"
+    componentes_texto = " + ".join(detalles_fallas) if len(detalles_fallas) > 0 else "Ninguno (Parámetros estables)"
 
-    # 4. GUARDAR EN LA BASE DE DATOS (HISTORIAL)
     nuevo_registro = SensorLogDB(
+        machine_id=datos.machine_id,
         temperature=datos.temperature,
         vibration=datos.vibration,
         humidity=datos.humidity,
@@ -135,9 +144,9 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nuevo_registro)
 
-    # 5. Respuesta al cliente
     return {
         "id_registro_historial": nuevo_registro.id,
+        "machine_id": nuevo_registro.machine_id,
         "timestamp": nuevo_registro.timestamp,
         "prediccion_clase": prediccion,
         "estado_motor": estado,
@@ -145,7 +154,6 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         "componentes_afectados": detalles_fallas if len(detalles_fallas) > 0 else ["Ninguno (Parámetros estables)"]
     }
 
-# Endpoint extra para consultar todo el historial acumulado
 @app.get("/historial")
 def ver_historial(db: Session = Depends(get_db)):
     registros = db.query(SensorLogDB).all()
@@ -153,3 +161,16 @@ def ver_historial(db: Session = Depends(get_db)):
         "total_registros": len(registros),
         "datos": registros
     }
+
+@app.get("/equipos/estado")
+def obtener_estado_equipos(db: Session = Depends(get_db)):
+    subquery = db.query(
+        SensorLogDB.machine_id, 
+        func.max(SensorLogDB.id).label("max_id")
+    ).group_by(SensorLogDB.machine_id).subquery()
+    
+    ultimos_registros = db.query(SensorLogDB).join(
+        subquery, SensorLogDB.id == subquery.c.max_id
+    ).all()
+    
+    return {"equipos": ultimos_registros}
