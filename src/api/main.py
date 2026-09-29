@@ -1,15 +1,28 @@
-from datetime import datetime
-from fastapi import FastAPI, Depends
+from datetime import datetime, timezone
+import json
+import os
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import joblib
 import pandas as pd
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 # --- CONFIGURACIÓN DE LA BASE DE DATOS SQLITE ---
 DATABASE_URL = "sqlite:///./data/agrosentinel_historial.db"
+BACKEND_RECORD_URL = os.getenv(
+    "AGROSENTINEL_BACKEND_URL",
+    "http://localhost:8080/api/predictive/records",
+)
+PREDICTIVE_API_TOKEN = os.getenv(
+    "PREDICTIVE_API_TOKEN",
+    "AgroSentinelPredictiveDevToken2026",
+)
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -21,7 +34,8 @@ class SensorLogDB(Base):
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     machine_id = Column(String, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    asset_id = Column(Integer, index=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     temperature = Column(Float)
     vibration = Column(Float)
     humidity = Column(Float)
@@ -34,6 +48,10 @@ class SensorLogDB(Base):
     componentes_afectados = Column(String)
 
 Base.metadata.create_all(bind=engine)
+with engine.begin() as connection:
+    sensor_log_columns = {column["name"] for column in inspect(engine).get_columns("historial_sensores")}
+    if "asset_id" not in sensor_log_columns:
+        connection.execute(text("ALTER TABLE historial_sensores ADD COLUMN asset_id INTEGER"))
 
 def get_db():
     db = SessionLocal()
@@ -60,7 +78,8 @@ app.add_middleware(
 modelo = joblib.load('data/modelo_rf_final.pkl')
 
 class DatosSensores(BaseModel):
-    machine_id: str = Field(..., description="ID único del equipo, ej: EQ-001")
+    asset_id: int = Field(..., gt=0, description="ID del activo registrado en AgroSentinel")
+    machine_id: str = Field(..., description="ID predictivo asignado al activo, ej: MOTOR-12")
     temperature: float
     vibration: float
     humidity: float
@@ -95,6 +114,25 @@ def diagnosticar_fallas(datos: DatosSensores):
 
     return anomalias
 
+def guardar_en_backend(registro: dict):
+    request = Request(
+        BACKEND_RECORD_URL,
+        data=json.dumps(registro).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Predictive-Token": PREDICTIVE_API_TOKEN,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10):
+            return
+    except (HTTPError, URLError, TimeoutError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="No fue posible guardar la predicción en la base de datos de AgroSentinel.",
+        ) from error
+
 @app.get("/")
 def home():
     return {"mensaje": "Motor monitoreado por AgroSentinel con base de datos de historial activa."}
@@ -126,9 +164,28 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         estado = "Motor Operando con Normalidad"
 
     componentes_texto = " + ".join(detalles_fallas) if len(detalles_fallas) > 0 else "Ninguno (Parámetros estables)"
+    timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    guardar_en_backend({
+        "assetId": datos.asset_id,
+        "machineId": datos.machine_id,
+        "timestamp": timestamp.isoformat(),
+        "temperature": datos.temperature,
+        "vibration": datos.vibration,
+        "humidity": datos.humidity,
+        "pressure": datos.pressure,
+        "energyConsumption": datos.energy_consumption,
+        "machineStatus": datos.machine_status,
+        "predictionClass": prediccion,
+        "motorState": estado,
+        "confidence": probabilidad,
+        "affectedComponents": componentes_texto,
+    })
 
     nuevo_registro = SensorLogDB(
+        asset_id=datos.asset_id,
         machine_id=datos.machine_id,
+        timestamp=timestamp,
         temperature=datos.temperature,
         vibration=datos.vibration,
         humidity=datos.humidity,
@@ -146,6 +203,7 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
 
     return {
         "id_registro_historial": nuevo_registro.id,
+        "asset_id": datos.asset_id,
         "machine_id": nuevo_registro.machine_id,
         "timestamp": nuevo_registro.timestamp,
         "prediccion_clase": prediccion,

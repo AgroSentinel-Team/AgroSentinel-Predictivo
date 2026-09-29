@@ -39,7 +39,7 @@ AgroSentinel-Predictivo/
 
 1. **Predicción con Machine Learning:** Clasificación basada en *Random Forest* entrenado sobre variables físicas clave.
 2. **Diagnóstico Inteligente (Reglas de Negocio):** Capa analítica acoplada que traduce la predicción en un informe detallado indicando exactamente qué componente está fallando (temperatura, vibración, presión, etc.).
-3. **Persistencia Automática (SQLite):** Cada solicitud de inferencia se registra de manera automática en una base de datos local para auditoría y trazabilidad.
+3. **Persistencia de lecturas:** Cada inferencia se guarda en SQLite para el reentrenamiento local y en PostgreSQL, asociada al activo de AgroSentinel, para consulta desde el panel y la hoja de vida predictiva.
 4. **MLOps Híbrido:** Script de reentrenamiento programado para unificar el dataset histórico original con los nuevos registros acumulados en producción mediante `pd.concat`.
 5. **Validación Estricta:** Uso de Pydantic (`Field` constraints) para blindar la API ante valores erróneos o estados de máquina inválidos.
 
@@ -87,8 +87,10 @@ Una vez iniciado, abre tu navegador y accede a la documentación interactiva (Sw
 ## 📡 Endpoints Principales
 
 * **`GET /`** -> Mensaje de bienvenida y estado del servicio.
-* **`POST /predecir`** -> Recibe las métricas de los sensores, evalúa el modelo, genera el diagnóstico por componentes y **guarda automáticamente el registro en SQLite**.
+* **`POST /predecir`** -> Recibe las métricas de los sensores, evalúa el modelo, genera el diagnóstico por componentes y guarda el registro en SQLite y PostgreSQL, asociado al activo.
 * **`GET /historial`** -> Retorna el listado completo de todas las telemetrías y predicciones almacenadas en la base de datos.
+
+Las predicciones también se envían a `POST http://localhost:8080/api/predictive/records`. El backend valida que el activo exista, tenga motor y coincida con su ID predictivo antes de guardarlas en PostgreSQL. Para producción, define el mismo secreto en `PREDICTIVE_API_TOKEN` para el backend y FastAPI; el valor predeterminado solo es apropiado para desarrollo. Si FastAPI corre en otro contenedor, configura `AGROSENTINEL_BACKEND_URL` con el nombre de host del servicio backend.
 
 ---
 
@@ -97,6 +99,8 @@ Una vez iniciado, abre tu navegador y accede a la documentación interactiva (Sw
 Puedes usar este JSON de ejemplo en Swagger para simular una alerta crítica por sobrecalentamiento:
 
 {
+   "asset_id": 12,
+   "machine_id": "MOTOR-12",
   "temperature": 110.2,
   "vibration": 65.0,
   "humidity": 60.0,
@@ -104,5 +108,7 @@ Puedes usar este JSON de ejemplo en Swagger para simular una alerta crítica por
   "energy_consumption": 3.8,
   "machine_status": 1
 }
+
+El `asset_id` se obtiene del activo registrado y el `machine_id` es el ID predictivo mostrado en su ficha. Ambos son obligatorios y deben corresponder al mismo activo con motor.
 * **Pandas & NumPy** (Manipulación y estructuración de datos)
 * **SQLAlchemy & SQLite** (ORM y persistencia relacional)
