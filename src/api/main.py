@@ -4,7 +4,7 @@ import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import joblib
@@ -33,9 +33,9 @@ class SensorLogDB(Base):
     __tablename__ = "historial_sensores"
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    backend_record_id = Column(Integer, index=True, nullable=True) # ID de PostgreSQL
     machine_id = Column(String, index=True)
     asset_id = Column(Integer, index=True)
-    backend_record_id = Column(Integer, unique=True, index=True, nullable=True)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     temperature = Column(Float)
     vibration = Column(Float)
@@ -44,30 +44,25 @@ class SensorLogDB(Base):
     energy_consumption = Column(Float)
     machine_status = Column(Integer)
     prediccion_clase = Column(Integer)
-    tipo_falla_predicha = Column(String)
-    falla_real_confirmada = Column(String)
+    tipo_falla_predicha = Column(String) # Etiqueta exacta de la IA
     estado_motor = Column(String)
     confianza = Column(Float)
     componentes_afectados = Column(String)
+    falla_real_confirmada = Column(String, nullable=True) # Verdad absoluta para reentrenar
 
 Base.metadata.create_all(bind=engine)
+
+# Migración automática si faltan columnas
 with engine.begin() as connection:
-    sensor_log_columns = {column["name"] for column in inspect(engine).get_columns("historial_sensores")}
-    missing_columns = {
-        "asset_id": "INTEGER",
-        "backend_record_id": "INTEGER",
-        "tipo_falla_predicha": "VARCHAR",
-        "falla_real_confirmada": "VARCHAR",
-    }
-    for column_name, column_type in missing_columns.items():
-        if column_name not in sensor_log_columns:
-            connection.execute(text(
-                f"ALTER TABLE historial_sensores ADD COLUMN {column_name} {column_type}"
-            ))
-    connection.execute(text(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_historial_sensores_backend_record_id "
-        "ON historial_sensores (backend_record_id)"
-    ))
+    columnas_actuales = {column["name"] for column in inspect(engine).get_columns("historial_sensores")}
+    if "asset_id" not in columnas_actuales:
+        connection.execute(text("ALTER TABLE historial_sensores ADD COLUMN asset_id INTEGER"))
+    if "backend_record_id" not in columnas_actuales:
+        connection.execute(text("ALTER TABLE historial_sensores ADD COLUMN backend_record_id INTEGER"))
+    if "tipo_falla_predicha" not in columnas_actuales:
+        connection.execute(text("ALTER TABLE historial_sensores ADD COLUMN tipo_falla_predicha VARCHAR"))
+    if "falla_real_confirmada" not in columnas_actuales:
+        connection.execute(text("ALTER TABLE historial_sensores ADD COLUMN falla_real_confirmada VARCHAR"))
 
 def get_db():
     db = SessionLocal()
@@ -79,8 +74,8 @@ def get_db():
 # --- CONFIGURACIÓN DE FASTAPI ---
 app = FastAPI(
     title="AgroSentinel Predictive API",
-    description="API para monitoreo predictivo multiclase, diagnóstico inteligente y persistencia de datos",
-    version="4.0"
+    description="API MLOps: Predicción Multiclase, Diagnóstico por Sensores y Feedback Loop",
+    version="6.0"
 )
 
 app.add_middleware(
@@ -91,9 +86,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cargar el nuevo modelo multiclase
+# Cargar el modelo multiclase
 modelo = joblib.load('data/modelo_rf_final.pkl')
 
+# --- SCHEMAS (PYDANTIC) ---
 class DatosSensores(BaseModel):
     asset_id: int = Field(..., gt=0, description="ID del activo registrado en AgroSentinel")
     machine_id: str = Field(..., description="ID predictivo asignado al activo, ej: MOTOR-12")
@@ -105,11 +101,48 @@ class DatosSensores(BaseModel):
     machine_status: int = Field(..., ge=0, le=1)
 
 class FeedbackRequest(BaseModel):
-    falla_real_confirmada: str = Field(..., min_length=1, max_length=120)
-    machine_id: str | None = None
-    timestamp: datetime | None = None
+    fallaRealConfirmada: str = Field(..., description="Falla real observada por el técnico en campo")
 
-def guardar_en_backend(registro: dict) -> int:
+# --- FUNCIONES DE DIAGNÓSTICO (HÍBRIDO) ---
+def diagnosticar_fallas_sensores(datos: DatosSensores):
+    anomalias = []
+    
+    # 1. TEMPERATURA
+    if datos.temperature > 105.0:
+        anomalias.append(f"T. Crítica ({datos.temperature}°C) - Revisar lubricación/ventilación")
+    elif datos.temperature < 40.0:
+        anomalias.append(f"T. Baja ({datos.temperature}°C) - Operación en vacío/Fallo de sensor")
+        
+    # 2. VIBRACIÓN
+    if datos.vibration > 90.0:
+        anomalias.append(f"Vibración Alta ({datos.vibration} Hz) - Revisar desalineación/rodamientos")
+        
+    # 3. HUMEDAD
+    if datos.humidity > 75.0:
+        anomalias.append(f"Humedad Alta ({datos.humidity}%) - Riesgo de condensación")
+        
+    # 4. PRESIÓN
+    if datos.pressure > 4.5:
+        anomalias.append(f"Presión Elevada ({datos.pressure} bar) - Válvulas obstruidas")
+    elif datos.pressure < 1.5:
+        anomalias.append(f"Presión Baja ({datos.pressure} bar) - Fugas/Filtros tapados")
+        
+    # 5. CONSUMO DE ENERGÍA
+    if datos.energy_consumption > 4.5:
+        anomalias.append(f"Consumo Alto ({datos.energy_consumption} kW) - Sobrecarga mecánica")
+        
+    return anomalias
+
+def obtener_explicacion_falla_ia(falla_ia: str):
+    causas = {
+        "overheating": "General: Fricción o sobrecarga.",
+        "vibration issue": "General: Desbalanceo o anclajes sueltos.",
+        "pressure drop": "General: Fallo en bomba de suministro.",
+        "electrical fault": "General: Aislamiento o cortocircuitos."
+    }
+    return causas.get(falla_ia.strip().lower(), "Revisión requerida.")
+
+def guardar_en_backend(registro: dict):
     request = Request(
         BACKEND_RECORD_URL,
         data=json.dumps(registro).encode("utf-8"),
@@ -121,23 +154,46 @@ def guardar_en_backend(registro: dict) -> int:
     )
     try:
         with urlopen(request, timeout=10) as response:
-            response_body = json.loads(response.read().decode("utf-8"))
-            backend_record_id = response_body.get("id")
-            if not isinstance(backend_record_id, int):
+            try:
+                response_body = json.loads(response.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
                 raise HTTPException(
                     status_code=502,
-                    detail="El backend no devolvió el ID de la predicción guardada.",
+                    detail="Spring Boot devolvió una respuesta JSON inválida al guardar la predicción.",
+                ) from error
+
+            backend_record_id = response_body.get("id") if isinstance(response_body, dict) else None
+            if type(backend_record_id) is not int or backend_record_id < 1:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Spring Boot no devolvió el ID de la predicción guardada.",
                 )
             return backend_record_id
-    except (HTTPError, URLError, TimeoutError) as error:
+    except HTTPError as error:
+        try:
+            response_body = json.loads(error.read().decode("utf-8"))
+            upstream_detail = (
+                response_body.get("detail") or response_body.get("message") or response_body.get("error")
+                if isinstance(response_body, dict)
+                else None
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            upstream_detail = None
+        detail = upstream_detail or f"Spring Boot rechazó la predicción (HTTP {error.code})."
         raise HTTPException(
             status_code=502,
-            detail="No fue posible guardar la predicción en la base de datos de AgroSentinel.",
+            detail=f"No fue posible guardar la predicción en AgroSentinel: {detail}",
+        ) from error
+    except (URLError, TimeoutError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="No fue posible conectar con el backend de AgroSentinel.",
         ) from error
 
+# --- ENDPOINTS ---
 @app.get("/")
 def home():
-    return {"mensaje": "Motor monitoreado por IA Multiclase AgroSentinel con base de datos de historial activa."}
+    return {"mensaje": "AgroSentinel Predictive API en línea. Ciclo MLOps y Diagnóstico Híbrido activos."}
 
 @app.post("/predecir")
 def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
@@ -150,27 +206,41 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         'machine_status': datos.machine_status
     }])
     
-    # 1. LA IA AHORA DEVUELVE EL TEXTO EXACTO DE LA FALLA
+    # 1. PREDICCIÓN DE IA
     tipo_falla_ia = str(modelo.predict(entrada_df)[0])
     probabilidad = float(modelo.predict_proba(entrada_df).max())
     
-    # 2. EVALUAR EL RESULTADO
-    # En el dataset de Kaggle, el estado normal suele llamarse "No Failure" o "Normal"
-    estado_seguro = tipo_falla_ia.strip().lower() in ["normal", "no failure", "none"]
+    # 2. DIAGNÓSTICO FÍSICO DE LÍMITES
+    alertas_sensores = diagnosticar_fallas_sensores(datos)
     
-    if estado_seguro:
+    # 3. EVALUACIÓN COMBINADA
+    estado_ia_seguro = tipo_falla_ia.strip().lower() in ["normal", "no failure", "none"]
+    
+    # Hay falla si la IA lo dice OR si algún sensor pasó el límite físico
+    if estado_ia_seguro and len(alertas_sensores) == 0:
         estado = "Motor Operando con Normalidad"
-        prediccion_num = 0  # 0 para la base de datos
+        prediccion_num = 0  
         componentes_texto = "Ninguno (Parámetros estables)"
     else:
-        estado = f"¡Alerta! Riesgo Detectado: {tipo_falla_ia}"
-        prediccion_num = 1  # 1 para indicar que SÍ hay una falla (para no romper tu DB)
-        componentes_texto = f"Diagnóstico IA: {tipo_falla_ia} (Confianza: {probabilidad*100:.1f}%)"
+        estado = "¡Alerta! Riesgo Detectado en Motor"
+        prediccion_num = 1  
+        
+        mensajes_finales = []
+        # Si la IA detecta algo anormal, agregamos su diagnóstico
+        if not estado_ia_seguro:
+            explicacion_ia = obtener_explicacion_falla_ia(tipo_falla_ia)
+            mensajes_finales.append(f"IA: {tipo_falla_ia} ({probabilidad*100:.1f}%) -> {explicacion_ia}")
+        
+        # Si los sensores superan límites, los listamos explícitamente
+        if len(alertas_sensores) > 0:
+            mensajes_finales.append("Sensores Críticos: " + " | ".join(alertas_sensores))
+            
+        componentes_texto = " || ".join(mensajes_finales)
 
     timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # 3. GUARDAR EN BACKEND JAVA/SPRING BOOT
-    backend_record_id = guardar_en_backend({
+    # 4. GUARDAR EN SPRING BOOT (Y recuperar el ID)
+    pg_id = guardar_en_backend({
         "assetId": datos.asset_id,
         "machineId": datos.machine_id,
         "timestamp": timestamp.isoformat(),
@@ -187,11 +257,11 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         "affectedComponents": componentes_texto,
     })
 
-    # 4. GUARDAR EN BASE DE DATOS LOCAL SQLITE
+    # 5. GUARDAR EN SQLITE LOCAL (Conectando el ID de Spring)
     nuevo_registro = SensorLogDB(
+        backend_record_id=pg_id,
         asset_id=datos.asset_id,
         machine_id=datos.machine_id,
-        backend_record_id=backend_record_id,
         timestamp=timestamp,
         temperature=datos.temperature,
         vibration=datos.vibration,
@@ -209,16 +279,32 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nuevo_registro)
 
-    # 5. RETORNAR RESPUESTA AL FRONTEND
     return {
         "id_registro_historial": nuevo_registro.id,
+        "backend_record_id": pg_id,
         "asset_id": datos.asset_id,
         "machine_id": nuevo_registro.machine_id,
         "timestamp": nuevo_registro.timestamp,
         "prediccion_clase": prediccion_num,
+        "tipo_falla_predicha": tipo_falla_ia,
         "estado_motor": estado,
         "confianza": probabilidad,
         "componentes_afectados": [componentes_texto]
+    }
+
+@app.put("/historial/{id}/feedback")
+def guardar_feedback(id: int, feedback: FeedbackRequest, db: Session = Depends(get_db)):
+    registro = db.query(SensorLogDB).filter(SensorLogDB.backend_record_id == id).first()
+    
+    if not registro:
+        raise HTTPException(status_code=404, detail=f"No se encontró el registro con backend_id {id} en SQLite.")
+        
+    registro.falla_real_confirmada = feedback.fallaRealConfirmada
+    db.commit()
+    
+    return {
+        "mensaje": "Feedback guardado exitosamente en SQLite", 
+        "falla_real": registro.falla_real_confirmada
     }
 
 @app.get("/historial")
@@ -228,50 +314,6 @@ def ver_historial(db: Session = Depends(get_db)):
         "total_registros": len(registros),
         "datos": registros
     }
-
-@app.put("/historial/{id}/feedback")
-def guardar_feedback(
-    id: int,
-    feedback: FeedbackRequest,
-    db: Session = Depends(get_db),
-    token: str = Header(..., alias="X-Predictive-Token"),
-):
-    if not PREDICTIVE_API_TOKEN or token != PREDICTIVE_API_TOKEN:
-        raise HTTPException(status_code=401, detail="Token del servicio predictivo inválido.")
-
-    registro = db.query(SensorLogDB).filter(
-        SensorLogDB.backend_record_id == id
-    ).one_or_none()
-    if registro is None and feedback.machine_id and feedback.timestamp:
-        candidatos = db.query(SensorLogDB).filter(
-            SensorLogDB.machine_id == feedback.machine_id,
-            SensorLogDB.timestamp == feedback.timestamp,
-            SensorLogDB.backend_record_id.is_(None),
-        ).limit(2).all()
-        if len(candidatos) > 1:
-            raise HTTPException(
-                status_code=409,
-                detail="Hay varias lecturas locales que coinciden con la predicción.",
-            )
-        if candidatos:
-            registro = candidatos[0]
-            registro.backend_record_id = id
-
-    if registro is None:
-        raise HTTPException(status_code=404, detail="No se encontró la lectura predictiva.")
-
-    falla_confirmada = feedback.falla_real_confirmada.strip()
-    clases_validas = {str(clase) for clase in modelo.classes_}
-    if falla_confirmada not in clases_validas:
-        raise HTTPException(
-            status_code=422,
-            detail="La falla confirmada no coincide con las clases conocidas por el modelo.",
-        )
-
-    registro.falla_real_confirmada = falla_confirmada
-    db.commit()
-    db.refresh(registro)
-    return registro
 
 @app.get("/equipos/estado")
 def obtener_estado_equipos(db: Session = Depends(get_db)):
