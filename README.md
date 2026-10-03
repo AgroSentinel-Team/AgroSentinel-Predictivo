@@ -69,7 +69,7 @@ Sigue estos pasos para clonar y poner en marcha el proyecto localmente:
    .\venv\Scripts\Activate
 
 3. **Instala las dependencias necesarias:**
-   pip install fastapi uvicorn pydantic pandas numpy scikit-learn joblib sqlalchemy seaborn matplotlib
+   pip install fastapi uvicorn pydantic pandas numpy scikit-learn joblib sqlalchemy seaborn matplotlib imbalanced-learn
 
 ---
 
@@ -89,8 +89,17 @@ Una vez iniciado, abre tu navegador y accede a la documentación interactiva (Sw
 * **`GET /`** -> Mensaje de bienvenida y estado del servicio.
 * **`POST /predecir`** -> Recibe las métricas de los sensores, evalúa el modelo, genera el diagnóstico por componentes y guarda el registro en SQLite y PostgreSQL, asociado al activo.
 * **`GET /historial`** -> Retorna el listado completo de todas las telemetrías y predicciones almacenadas en la base de datos.
+* **`PUT /historial/{id}/feedback`** -> Guarda la falla confirmada por el técnico en `falla_real_confirmada`. El `id` de esta ruta es el ID del registro en Spring Boot; el servicio lo relaciona con SQLite mediante `backend_record_id`.
 
-Las predicciones también se envían a `POST http://localhost:8080/api/predictive/records`. El backend valida que el activo exista, tenga motor y coincida con su ID predictivo antes de guardarlas en PostgreSQL. Para producción, define el mismo secreto en `PREDICTIVE_API_TOKEN` para el backend y FastAPI; el valor predeterminado solo es apropiado para desarrollo. Si FastAPI corre en otro contenedor, configura `AGROSENTINEL_BACKEND_URL` con el nombre de host del servicio backend.
+Las predicciones también se envían a `POST http://localhost:8080/api/predictive/records`. El backend valida que el activo exista, tenga motor y coincida con su ID predictivo antes de guardarlas en PostgreSQL. La interfaz React envía feedback a `PUT http://localhost:8080/api/predictive/records/{id}/feedback`; Spring lo persiste en PostgreSQL y lo sincroniza con FastAPI/SQLite. Para producción, define el mismo secreto en `PREDICTIVE_API_TOKEN` para el backend y FastAPI; el valor predeterminado solo es apropiado para desarrollo. Si FastAPI corre en otro contenedor, configura `AGROSENTINEL_BACKEND_URL` con el nombre de host del servicio backend y `PREDICTIVE_API_URL` en Spring Boot con el nombre de host de FastAPI.
+
+El cuerpo del feedback acepta las etiquetas de clase reales del modelo, por ejemplo:
+
+```json
+{
+  "fallaRealConfirmada": "Overheating"
+}
+```
 
 ---
 
