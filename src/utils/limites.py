@@ -1,7 +1,11 @@
 import pandas as pd
 
-# Cargamos el dataset
 df = pd.read_csv('data/smart_manufacturing_data.csv')
 
-# Imprimimos el mínimo, máximo y promedio de cada sensor
+# Tu código original (sigue funcionando perfecto)
+print("--- ESTADÍSTICAS GENERALES ---")
 print(df[['temperature', 'vibration', 'humidity', 'pressure', 'energy_consumption']].describe().T[['min', 'mean', 'max']])
+
+
+print("\n--- PROMEDIOS POR TIPO DE FALLA ---")
+print(df.groupby('failure_type')[['temperature', 'vibration', 'humidity', 'pressure', 'energy_consumption']].mean())
