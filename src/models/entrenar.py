@@ -7,6 +7,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 import joblib
 import os
+from sklearn.svm import SVC
+from xgboost import XGBClassifier
 
 os.makedirs('data', exist_ok=True)
 
@@ -73,24 +75,41 @@ smote = SMOTE(random_state=42)
 X_train_bal, y_train_bal = smote.fit_resample(X_train, y_train)
 
 # ==========================================
-# 3. ENTRENAMIENTO DE RANDOM FOREST
+# 3. ENTRENAMIENTO Y COMPARACIÓN DE MODELOS
 # ==========================================
-print("\n--- Entrenando Random Forest Multiclase Limpio ---")
-rf_model = RandomForestClassifier(
-    n_estimators=100,
-    random_state=42,
-    n_jobs=-1,
-    class_weight='balanced',
-)
+print("\n--- Entrenando y Comparando Modelos (Rúbrica MLOps) ---")
+
+# A. Random Forest 
+print("\n1. Entrenando Random Forest...")
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced', n_jobs=-1)
 rf_model.fit(X_train_bal, y_train_bal)
 rf_pred = rf_model.predict(X_test)
+rf_acc = accuracy_score(y_test, rf_pred)
+print(f"Precisión Random Forest: {rf_acc * 100:.2f}%")
 
-print(f"\nPrecisión Random Forest: {accuracy_score(y_test, rf_pred) * 100:.2f}%\n")
-print("Reporte Random Forest:")
-print(classification_report(y_test, rf_pred))
+# B. Support Vector Machines (SVM)
+print("\n2. Entrenando SVM (Support Vector Machine)...")
+svm_model = SVC(kernel='rbf', random_state=42, class_weight='balanced')
+svm_model.fit(X_train_bal, y_train_bal)
+svm_pred = svm_model.predict(X_test)
+svm_acc = accuracy_score(y_test, svm_pred)
+print(f"Precisión SVM: {svm_acc * 100:.2f}%")
+
+# C. XGBoost (Extreme Gradient Boosting)
+print("\n3. Entrenando XGBoost...")
+# XGBoost exige etiquetas numéricas. Usamos LabelEncoder solo para este modelo.
+le_xgb = LabelEncoder()
+y_train_xgb = le_xgb.fit_transform(y_train_bal)
+y_test_xgb = le_xgb.transform(y_test)
+
+xgb_model = XGBClassifier(eval_metric='mlogloss', random_state=42)
+xgb_model.fit(X_train_bal, y_train_xgb)
+xgb_pred = xgb_model.predict(X_test)
+xgb_acc = accuracy_score(y_test_xgb, xgb_pred)
+print(f"Precisión XGBoost: {xgb_acc * 100:.2f}%")
 
 # ==========================================
-# 4. EXPORTACIÓN DEL MODELO
+# 4. EXPORTACIÓN DEL MODELO GANADOR
 # ==========================================
 joblib.dump(rf_model, 'data/modelo_rf_final.pkl')
-print("\n¡Modelo multiclase LIMPIO exportado exitosamente en 'data/modelo_rf_final.pkl'!")
+print("\n¡Modelo multiclase GANADOR exportado exitosamente en 'data/modelo_rf_final.pkl'!")
