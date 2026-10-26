@@ -1,8 +1,13 @@
-import pickle
+import torch
 
-# Se agregó la extensión .pkl al final de la ruta
-with open('data/modelo_rf_final.pkl', 'rb') as archivo:
-    datos = pickle.load(archivo)
+try:
+    datos = torch.load('data/modelo_lstm_final.pt', map_location='cpu', weights_only=False)
+except TypeError:
+    datos = torch.load('data/modelo_lstm_final.pt', map_location='cpu')
 
-# Imprime el contenido para verlo en la terminal
-print(datos)
+print({
+    "classes": datos["classes"],
+    "sequence_length": datos["sequence_length"],
+    "best_epoch": datos["best_epoch"],
+    "validation_accuracy": datos["validation_accuracy"],
+})

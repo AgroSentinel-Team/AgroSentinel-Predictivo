@@ -1,6 +1,6 @@
 # 🌾 AgroSentinel: Sistema de Mantenimiento Predictivo para Motores Agrícolas
 
-**AgroSentinel** es una solución robusta de Machine Learning e ingeniería de backend diseñada para el monitoreo predictivo en tiempo real de motores agrícolas. El sistema combina un modelo de clasificación optimizado (Random Forest), validación estricta de datos, diagnóstico inteligente de fallas y persistencia local mediante base de datos relacional.
+**AgroSentinel** es una solución robusta de Machine Learning e ingeniería de backend diseñada para el monitoreo predictivo en tiempo real de motores agrícolas. El sistema utiliza una red Long Short-Term Memory (LSTM) para clasificar secuencias de lecturas de sensores, además de validación estricta de datos, diagnóstico inteligente de fallas y persistencia local mediante base de datos relacional.
 
 ---
 
@@ -13,7 +13,7 @@ AgroSentinel-Predictivo/
 │
 ├── data/                               # Artefactos de datos, modelos entrenados y DB
 │   ├── smart_manufacturing_data.csv    # Dataset base original
-│   ├── modelo_rf_final.pkl             # Modelo de Machine Learning entrenado
+│   ├── modelo_lstm_final.pt            # Red LSTM entrenada
 │   └── agrosentinel_historial.db       # Base de datos SQLite (Persistencia de logs)
 │
 ├── notebooks/                          # Análisis exploratorio y preprocesamiento
@@ -37,7 +37,7 @@ AgroSentinel-Predictivo/
 
 ## 🚀 Características Principales
 
-1. **Predicción con Machine Learning:** Clasificación basada en *Random Forest* entrenado sobre variables físicas clave.
+1. **Predicción con Machine Learning:** Red *LSTM* que analiza secuencias de lecturas de sensores para clasificar el estado del motor.
 2. **Diagnóstico Inteligente (Reglas de Negocio):** Capa analítica acoplada que traduce la predicción en un informe detallado indicando exactamente qué componente está fallando (temperatura, vibración, presión, etc.).
 3. **Persistencia de lecturas:** Cada inferencia se guarda en SQLite para el reentrenamiento local y en PostgreSQL, asociada al activo de AgroSentinel, para consulta desde el panel y la hoja de vida predictiva.
 4. **MLOps Híbrido:** Script de reentrenamiento programado para unificar el dataset histórico original con los nuevos registros acumulados en producción mediante `pd.concat`.
@@ -49,7 +49,8 @@ AgroSentinel-Predictivo/
 
 * **Python 3.10+**
 * **FastAPI & Uvicorn** (Framework web y servidor ASGI de alto rendimiento)
-* **Scikit-Learn & Joblib** (Entrenamiento y serialización del modelo de IA)
+* **PyTorch** (Entrenamiento e inferencia de la red LSTM)
+* **Scikit-Learn** (Métricas de evaluación)
 * **Pandas & NumPy** (Manipulación y estructuración de datos)
 * **SQLAlchemy & SQLite** (ORM y persistencia relacional)
 
@@ -69,7 +70,7 @@ Sigue estos pasos para clonar y poner en marcha el proyecto localmente:
    .\venv\Scripts\Activate
 
 3. **Instala las dependencias necesarias:**
-   pip install fastapi uvicorn pydantic pandas numpy scikit-learn joblib sqlalchemy seaborn matplotlib imbalanced-learn xgboost
+   pip install -r requirements.txt
 
 ---
 
@@ -90,8 +91,15 @@ Una vez iniciado, abre tu navegador y accede a la documentación interactiva (Sw
 * **`POST /predecir`** -> Recibe las métricas de los sensores, evalúa el modelo, genera el diagnóstico por componentes y guarda el registro en SQLite y PostgreSQL, asociado al activo.
 * **`GET /historial`** -> Retorna el listado completo de todas las telemetrías y predicciones almacenadas en la base de datos.
 * **`PUT /historial/{id}/feedback`** -> Guarda la falla confirmada por el técnico en `falla_real_confirmada`. El `id` de esta ruta es el ID del registro en Spring Boot; el servicio lo relaciona con SQLite mediante `backend_record_id`.
+* **`GET /api/predictive/validation/summary`** (Spring Boot) -> Retorna la cantidad de lecturas confirmadas por técnicos, los aciertos y la exactitud acumulada del modelo.
 
 Las predicciones también se envían a `POST http://localhost:8080/api/predictive/records`. El backend valida que el activo exista, tenga motor y coincida con su ID predictivo antes de guardarlas en PostgreSQL. La interfaz React envía feedback a `PUT http://localhost:8080/api/predictive/records/{id}/feedback`; Spring lo persiste en PostgreSQL y lo sincroniza con FastAPI/SQLite. Para producción, define el mismo secreto en `PREDICTIVE_API_TOKEN` para el backend y FastAPI; el valor predeterminado solo es apropiado para desarrollo. Si FastAPI corre en otro contenedor, configura `AGROSENTINEL_BACKEND_URL` con el nombre de host del servicio backend y `PREDICTIVE_API_URL` en Spring Boot con el nombre de host de FastAPI.
+
+La confianza de cada predicción se muestra inmediatamente como la probabilidad estimada por la LSTM para la clase elegida; no es una garantía ni una confirmación de acierto. La exactitud en vivo se calcula comparando `tipoFallaPredicha` con `fallaRealConfirmada` (sin distinguir mayúsculas/minúsculas) y solo incluye lecturas con feedback técnico. Las lecturas nuevas quedan pendientes de esa validación real.
+
+Para entrenar la LSTM desde la raíz del proyecto, ejecuta `python -m src.models.entrenar`. El entrenamiento ordena las lecturas por máquina y fecha, usa ventanas deslizantes de diez lecturas y reserva cronológicamente el último 20 % de cada máquina para validación. Genera las etiquetas objetivo con las mismas reglas físicas del servicio, pondera las clases minoritarias y guarda el modelo y sus metadatos en `data/modelo_lstm_final.pt`. La validación mide qué tan bien aprende esas reglas, no exactitud frente a fallas reales independientes; revisa el F1 y el reporte por clase además de la exactitud global.
+
+En producción, cada nueva lectura se combina con hasta las nueve lecturas anteriores de esa máquina almacenadas en SQLite. Si aún no hay diez lecturas, la ventana se completa repitiendo la primera lectura disponible. Para reentrenar con las confirmaciones técnicas, ejecuta `python -m src.models.reentrena`; las etiquetas confirmadas se combinan con el histórico y vuelven a validarse cronológicamente. La exactitud global puede ocultar errores en las clases raras; consulta el F1 y el reporte por clase que imprime el entrenamiento.
 
 El cuerpo del feedback acepta las etiquetas de clase reales del modelo, por ejemplo:
 

@@ -3,15 +3,13 @@ import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import joblib
-import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from src.models.lstm_model import load_lstm_model, predict_lstm
 
 # --- CONFIGURACIÓN DE LA BASE DE DATOS SQLITE ---
 DATABASE_URL = "sqlite:///./data/agrosentinel_historial.db"
@@ -86,8 +84,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cargar el modelo multiclase
-modelo = joblib.load('data/modelo_rf_final.pkl')
+# Cargar la LSTM y los metadatos de escalado y clases de su entrenamiento
+modelo, metadatos_modelo = load_lstm_model("data/modelo_lstm_final.pt")
 
 # --- SCHEMAS (PYDANTIC) ---
 class DatosSensores(BaseModel):
@@ -197,23 +195,43 @@ def home():
 
 @app.post("/predecir")
 def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
-    entrada_df = pd.DataFrame([{
+    lectura_actual = {
         'temperature': datos.temperature,
         'vibration': datos.vibration,
         'humidity': datos.humidity,
         'pressure': datos.pressure,
         'energy_consumption': datos.energy_consumption,
         'machine_status': datos.machine_status
-    }])
+    }
     
-    # 1. PREDICCIÓN DE IA
-    tipo_falla_ia = str(modelo.predict(entrada_df)[0])
-    probabilidad = float(modelo.predict_proba(entrada_df).max())
+    # 1. Secuencia temporal: últimas lecturas de esta máquina y la lectura recién recibida
+    lecturas_previas = (
+        db.query(SensorLogDB)
+        .filter(SensorLogDB.machine_id == datos.machine_id)
+        .order_by(SensorLogDB.timestamp.desc(), SensorLogDB.id.desc())
+        .limit(metadatos_modelo["sequence_length"] - 1)
+        .all()
+    )
+    secuencia = [
+        {
+            "temperature": registro.temperature,
+            "vibration": registro.vibration,
+            "humidity": registro.humidity,
+            "pressure": registro.pressure,
+            "energy_consumption": registro.energy_consumption,
+            "machine_status": registro.machine_status,
+        }
+        for registro in reversed(lecturas_previas)
+    ]
+    secuencia.append(lectura_actual)
+
+    # 2. PREDICCIÓN LSTM
+    tipo_falla_ia, probabilidad = predict_lstm(modelo, metadatos_modelo, secuencia)
     
-    # 2. DIAGNÓSTICO FÍSICO DE LÍMITES
+    # 3. DIAGNÓSTICO FÍSICO DE LÍMITES
     alertas_sensores = diagnosticar_fallas_sensores(datos)
     
-    # 3. EVALUACIÓN COMBINADA
+    # 4. EVALUACIÓN COMBINADA
     estado_ia_seguro = tipo_falla_ia.strip().lower() in ["normal", "no failure", "none"]
     
     # Hay falla si la IA lo dice OR si algún sensor pasó el límite físico
@@ -239,7 +257,7 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
 
     timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # 4. GUARDAR EN SPRING BOOT (Y recuperar el ID)
+    # 5. GUARDAR EN SPRING BOOT (Y recuperar el ID)
     pg_id = guardar_en_backend({
         "assetId": datos.asset_id,
         "machineId": datos.machine_id,
@@ -257,7 +275,7 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         "affectedComponents": componentes_texto,
     })
 
-    # 5. GUARDAR EN SQLITE LOCAL (Conectando el ID de Spring)
+    # 6. GUARDAR EN SQLITE LOCAL (Conectando el ID de Spring)
     nuevo_registro = SensorLogDB(
         backend_record_id=pg_id,
         asset_id=datos.asset_id,
