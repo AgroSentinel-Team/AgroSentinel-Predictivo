@@ -33,9 +33,9 @@ BACKEND_RECORD_URL = os.getenv(
     "AGROSENTINEL_BACKEND_URL",
     "http://localhost:8080/api/predictive/records",
 )
-PREDICTIVE_API_TOKEN = os.getenv(
-    "PREDICTIVE_API_TOKEN",
-    "AgroSentinelPredictiveDevToken2026",
+PREDICTIVE_TOKEN = os.getenv(
+    "PREDICTIVE_TOKEN",
+    os.getenv("PREDICTIVE_API_TOKEN", "AgroSentinelPredictiveDevToken2026"),
 )
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -268,7 +268,7 @@ def guardar_en_backend(registro: dict):
         data=json.dumps(registro).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "X-Predictive-Token": PREDICTIVE_API_TOKEN,
+            "X-Predictive-Token": PREDICTIVE_TOKEN,
         },
         method="POST",
     )
