@@ -26,7 +26,7 @@ NUM_LAYERS = 2
 BATCH_SIZE = 512
 MAX_EPOCHS = 25
 PATIENCE = 5
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 MODEL_PATH = str(DATA_DIR / "modelo_lstm_final.pt")
 

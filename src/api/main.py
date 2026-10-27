@@ -1,10 +1,16 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+import joblib
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request as FastAPIRequest
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
@@ -12,7 +18,17 @@ from sqlalchemy.orm import sessionmaker, Session
 from src.models.lstm_model import load_lstm_model, predict_lstm
 
 # --- CONFIGURACIÓN DE LA BASE DE DATOS SQLITE ---
-DATABASE_URL = "sqlite:///./data/agrosentinel_historial.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data"
+DATABASE_URL = f"sqlite:///{(DATA_DIR / 'agrosentinel_historial.db').as_posix()}"
+FEATURE_COLUMNS = [
+    "temperature",
+    "vibration",
+    "humidity",
+    "pressure",
+    "energy_consumption",
+    "machine_status",
+]
 BACKEND_RECORD_URL = os.getenv(
     "AGROSENTINEL_BACKEND_URL",
     "http://localhost:8080/api/predictive/records",
@@ -70,10 +86,49 @@ def get_db():
         db.close()
 
 # --- CONFIGURACIÓN DE FASTAPI ---
+def cargar_modelos():
+    def cargar_modelo_tabular(nombre_archivo):
+        ruta_modelo = DATA_DIR / nombre_archivo
+        if not ruta_modelo.is_file():
+            raise FileNotFoundError(
+                f"No se encontró '{ruta_modelo}'. Entrena los modelos tabulares "
+                "con 'python -m src.models.entrenar_tabular'."
+            )
+        return joblib.load(ruta_modelo)
+
+    modelos = {
+        "rf": cargar_modelo_tabular("modelo_rf.pkl"),
+        "svm": cargar_modelo_tabular("modelo_svm.pkl"),
+    }
+    artefacto_xgb = cargar_modelo_tabular("modelo_xgb.pkl")
+    if not isinstance(artefacto_xgb, dict) or not {
+        "model",
+        "label_encoder",
+        "feature_columns",
+    }.issubset(artefacto_xgb):
+        raise ValueError(
+            "El artefacto data/modelo_xgb.pkl debe incluir model, label_encoder y feature_columns."
+        )
+    if artefacto_xgb["feature_columns"] != FEATURE_COLUMNS:
+        raise ValueError("El orden de características de XGBoost no coincide con la API.")
+    modelos["xgb"] = artefacto_xgb
+    modelos["lstm"], modelos["lstm_metadata"] = load_lstm_model(
+        DATA_DIR / "modelo_lstm_final.pt"
+    )
+    return modelos
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    application.state.modelos = cargar_modelos()
+    yield
+
+
 app = FastAPI(
     title="AgroSentinel Predictive API",
     description="API MLOps: Predicción Multiclase, Diagnóstico por Sensores y Feedback Loop",
-    version="6.0"
+    version="7.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -83,9 +138,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Cargar la LSTM y los metadatos de escalado y clases de su entrenamiento
-modelo, metadatos_modelo = load_lstm_model("data/modelo_lstm_final.pt")
 
 # --- SCHEMAS (PYDANTIC) ---
 class DatosSensores(BaseModel):
@@ -130,6 +182,72 @@ def diagnosticar_fallas_sensores(datos: DatosSensores):
         anomalias.append(f"Consumo Alto ({datos.energy_consumption} kW) - Sobrecarga mecánica")
         
     return anomalias
+
+
+def diagnosticar_reglas_fisicas(datos: DatosSensores):
+    if datos.temperature > 105.0:
+        return "Overheating"
+    if datos.vibration > 90.0:
+        return "Vibration Issue"
+    if datos.pressure < 1.5 or datos.pressure > 4.5:
+        return "Pressure Drop"
+    if datos.energy_consumption > 4.5:
+        return "Electrical Fault"
+    return "Normal"
+
+
+def votar_modelos_tabulares(voto_rf, voto_svm, voto_xgb):
+    votos = [voto_rf, voto_svm, voto_xgb]
+    conteo_votos = {
+        etiqueta: votos.count(etiqueta)
+        for etiqueta in dict.fromkeys(votos)
+    }
+    maximo_votos = max(conteo_votos.values())
+    ganadores = [
+        etiqueta
+        for etiqueta, cantidad in conteo_votos.items()
+        if cantidad == maximo_votos
+    ]
+    diagnostico = ganadores[0] if len(ganadores) == 1 else voto_rf
+    return diagnostico, maximo_votos / len(votos), conteo_votos
+
+
+def explicar_confianza(
+    voto_reglas,
+    tipo_falla_final,
+    confianza_final,
+    conteo_votos,
+    voto_rf,
+    voto_svm,
+    voto_xgb,
+):
+    porcentaje = round(confianza_final * 100)
+    if voto_reglas != "Normal":
+        return (
+            f"El {porcentaje}% corresponde a la aplicación de la regla física "
+            f"'{tipo_falla_final}' (no a una probabilidad calibrada del modelo). "
+            "Los modelos tabulares no votaron porque prevaleció el umbral físico."
+        )
+
+    votos_texto = (
+        f"Random Forest: {voto_rf}; SVM: {voto_svm}; XGBoost: {voto_xgb}."
+    )
+    cantidad_mayoritaria = max(conteo_votos.values())
+    if cantidad_mayoritaria == 1:
+        motivo = (
+            "Los tres modelos discrepan (1 de 3 votos para cada clase); "
+            f"se eligió '{tipo_falla_final}' porque Random Forest resuelve el empate."
+        )
+    else:
+        motivo = (
+            f"{cantidad_mayoritaria} de 3 modelos coinciden en "
+            f"'{tipo_falla_final}'."
+        )
+    return (
+        f"El {porcentaje}% es el nivel de acuerdo entre los tres modelos tabulares, "
+        f"no una probabilidad calibrada de acierto. {motivo} {votos_texto}"
+    )
+
 
 def obtener_explicacion_falla_ia(falla_ia: str):
     causas = {
@@ -194,22 +312,64 @@ def home():
     return {"mensaje": "AgroSentinel Predictive API en línea. Ciclo MLOps y Diagnóstico Híbrido activos."}
 
 @app.post("/predecir")
-def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
+def predecir_falla(
+    datos: DatosSensores,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+):
+    modelos = request.app.state.modelos
     lectura_actual = {
-        'temperature': datos.temperature,
-        'vibration': datos.vibration,
-        'humidity': datos.humidity,
-        'pressure': datos.pressure,
-        'energy_consumption': datos.energy_consumption,
-        'machine_status': datos.machine_status
+        "temperature": datos.temperature,
+        "vibration": datos.vibration,
+        "humidity": datos.humidity,
+        "pressure": datos.pressure,
+        "energy_consumption": datos.energy_consumption,
+        "machine_status": datos.machine_status,
     }
-    
+
+    fila_actual = pd.DataFrame([lectura_actual], columns=FEATURE_COLUMNS)
+
+    # 1. Diagnóstico físico, voto tabular y contexto temporal
+    voto_reglas = diagnosticar_reglas_fisicas(datos)
+    if voto_reglas == "Normal":
+        voto_rf = str(modelos["rf"].predict(fila_actual)[0])
+        voto_svm = str(modelos["svm"].predict(fila_actual)[0])
+        prediccion_xgb = modelos["xgb"]["model"].predict(fila_actual)
+        voto_xgb = str(
+            modelos["xgb"]["label_encoder"].inverse_transform(
+                np.asarray(prediccion_xgb, dtype=np.int64).reshape(-1)
+            )[0]
+        )
+    else:
+        voto_rf = voto_svm = voto_xgb = "No ejecutado (regla física)"
+
+    if voto_reglas != "Normal":
+        diagnostico_tabular = None
+        tipo_falla_final = voto_reglas
+        confianza_final = 1.0
+        conteo_votos = {}
+    else:
+        diagnostico_tabular, confianza_final, conteo_votos = votar_modelos_tabulares(
+            voto_rf, voto_svm, voto_xgb
+        )
+        tipo_falla_final = diagnostico_tabular
+
+    razon_confianza = explicar_confianza(
+        voto_reglas,
+        tipo_falla_final,
+        confianza_final,
+        conteo_votos,
+        voto_rf,
+        voto_svm,
+        voto_xgb,
+    )
+
     # 1. Secuencia temporal: últimas lecturas de esta máquina y la lectura recién recibida
     lecturas_previas = (
         db.query(SensorLogDB)
         .filter(SensorLogDB.machine_id == datos.machine_id)
         .order_by(SensorLogDB.timestamp.desc(), SensorLogDB.id.desc())
-        .limit(metadatos_modelo["sequence_length"] - 1)
+        .limit(modelos["lstm_metadata"]["sequence_length"] - 1)
         .all()
     )
     secuencia = [
@@ -225,39 +385,47 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
     ]
     secuencia.append(lectura_actual)
 
-    # 2. PREDICCIÓN LSTM
-    tipo_falla_ia, probabilidad = predict_lstm(modelo, metadatos_modelo, secuencia)
-    
-    # 3. DIAGNÓSTICO FÍSICO DE LÍMITES
+    tendencia_lstm, confianza_lstm = predict_lstm(
+        modelos["lstm"], modelos["lstm_metadata"], secuencia
+    )
+
+    # 2. Alertas descriptivas adicionales para el estado y los componentes afectados
     alertas_sensores = diagnosticar_fallas_sensores(datos)
-    
-    # 4. EVALUACIÓN COMBINADA
-    estado_ia_seguro = tipo_falla_ia.strip().lower() in ["normal", "no failure", "none"]
-    
-    # Hay falla si la IA lo dice OR si algún sensor pasó el límite físico
-    if estado_ia_seguro and len(alertas_sensores) == 0:
-        estado = "Motor Operando con Normalidad"
-        prediccion_num = 0  
-        componentes_texto = "Ninguno (Parámetros estables)"
-    else:
-        estado = "¡Alerta! Riesgo Detectado en Motor"
-        prediccion_num = 1  
-        
-        mensajes_finales = []
-        # Si la IA detecta algo anormal, agregamos su diagnóstico
-        if not estado_ia_seguro:
-            explicacion_ia = obtener_explicacion_falla_ia(tipo_falla_ia)
-            mensajes_finales.append(f"IA: {tipo_falla_ia} ({probabilidad*100:.1f}%) -> {explicacion_ia}")
-        
-        # Si los sensores superan límites, los listamos explícitamente
-        if len(alertas_sensores) > 0:
-            mensajes_finales.append("Sensores Críticos: " + " | ".join(alertas_sensores))
-            
-        componentes_texto = " || ".join(mensajes_finales)
+    estado_normal = tipo_falla_final.strip().lower() in ["normal", "no failure", "none"]
+    estado = (
+        "Motor Operando con Normalidad"
+        if estado_normal and not alertas_sensores
+        else "¡Alerta! Riesgo Detectado en Motor"
+    )
+    prediccion_num = 0 if estado_normal else 1
+
+    mensajes_finales = []
+    if not estado_normal:
+        origen = "Regla física" if voto_reglas != "Normal" else "Votación tabular"
+        mensajes_finales.append(
+            f"{origen}: {tipo_falla_final} -> {obtener_explicacion_falla_ia(tipo_falla_final)}"
+        )
+    if alertas_sensores:
+        mensajes_finales.append("Sensores Críticos: " + " | ".join(alertas_sensores))
+    componentes_texto = (
+        " || ".join(mensajes_finales)
+        if mensajes_finales
+        else "Ninguno (Parámetros estables)"
+    )
 
     timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    # 5. GUARDAR EN SPRING BOOT (Y recuperar el ID)
+    detalle_consenso = {
+        "random_forest": voto_rf,
+        "svm": voto_svm,
+        "xgboost": voto_xgb,
+        "reglas_fisicas": voto_reglas,
+        "conteo_votos": conteo_votos,
+        "diagnostico_tabular": diagnostico_tabular,
+        "veredicto_final": tipo_falla_final,
+    }
+
+    # 3. GUARDAR EN SPRING BOOT (Y recuperar el ID)
     pg_id = guardar_en_backend({
         "assetId": datos.asset_id,
         "machineId": datos.machine_id,
@@ -269,13 +437,16 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         "energyConsumption": datos.energy_consumption,
         "machineStatus": datos.machine_status,
         "predictionClass": prediccion_num,
-        "tipoFallaPredicha": tipo_falla_ia,
+        "tipoFallaPredicha": tipo_falla_final,
         "motorState": estado,
-        "confidence": probabilidad,
+        "confidence": confianza_final,
         "affectedComponents": componentes_texto,
+        "tendencia_lstm": tendencia_lstm,
+        "confianza_lstm": confianza_lstm,
+        "razon_confianza": razon_confianza,
     })
 
-    # 6. GUARDAR EN SQLITE LOCAL (Conectando el ID de Spring)
+    # 4. GUARDAR EN SQLITE LOCAL (Conectando el ID de Spring)
     nuevo_registro = SensorLogDB(
         backend_record_id=pg_id,
         asset_id=datos.asset_id,
@@ -288,9 +459,9 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         energy_consumption=datos.energy_consumption,
         machine_status=datos.machine_status,
         prediccion_clase=prediccion_num,
-        tipo_falla_predicha=tipo_falla_ia,
+        tipo_falla_predicha=tipo_falla_final,
         estado_motor=estado,
-        confianza=probabilidad,
+        confianza=confianza_final,
         componentes_afectados=componentes_texto
     )
     db.add(nuevo_registro)
@@ -304,9 +475,14 @@ def predecir_falla(datos: DatosSensores, db: Session = Depends(get_db)):
         "machine_id": nuevo_registro.machine_id,
         "timestamp": nuevo_registro.timestamp,
         "prediccion_clase": prediccion_num,
-        "tipo_falla_predicha": tipo_falla_ia,
+        "tipoFallaPredicha": tipo_falla_final,
+        "tipo_falla_predicha": tipo_falla_final,
+        "detalle_consenso": detalle_consenso,
+        "tendencia_lstm": tendencia_lstm,
+        "confianza_lstm": confianza_lstm,
+        "razon_confianza": razon_confianza,
         "estado_motor": estado,
-        "confianza": probabilidad,
+        "confianza": confianza_final,
         "componentes_afectados": [componentes_texto]
     }
 

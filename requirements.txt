@@ -4,5 +4,8 @@ pydantic
 numpy
 pandas
 scikit-learn
+imbalanced-learn
+joblib
+xgboost
 sqlalchemy
 torch

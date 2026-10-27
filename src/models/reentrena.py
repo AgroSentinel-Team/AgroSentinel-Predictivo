@@ -2,7 +2,7 @@ import sqlite3
 
 import pandas as pd
 
-from src.models.entrenar import MODEL_PATH, apply_physical_failure_labels, train_and_save
+from src.models.entrenar_lstm import MODEL_PATH, apply_physical_failure_labels, train_and_save
 
 
 def main():
