@@ -11,7 +11,7 @@ import pandas as pd
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request as FastAPIRequest
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, func, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -151,7 +151,11 @@ class DatosSensores(BaseModel):
     machine_status: int = Field(..., ge=0, le=1)
 
 class FeedbackRequest(BaseModel):
-    fallaRealConfirmada: str = Field(..., description="Falla real observada por el técnico en campo")
+    fallaRealConfirmada: str = Field(
+        ...,
+        validation_alias=AliasChoices("fallaRealConfirmada", "falla_real_confirmada"),
+        description="Falla real observada por el técnico en campo",
+    )
 
 # --- FUNCIONES DE DIAGNÓSTICO (HÍBRIDO) ---
 def diagnosticar_fallas_sensores(datos: DatosSensores):
